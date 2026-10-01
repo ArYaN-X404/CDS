@@ -103,21 +103,52 @@ def render_dashboard(telemetry: Optional[dict]) -> Panel:
 
 
 def monitor_loop(bridge: CloudBridge):
-    """Live terminal monitoring loop with graceful Ctrl+C handling."""
+    """
+    Live terminal monitoring loop — TTY-aware.
+    - Real TTY (Windows Terminal / Linux): Rich Live in-place redraw.
+    - Non-TTY (raw PowerShell, CI, piped): simple line-per-update every 5s. No spam.
+    """
     console.print("\n[bold cyan]⚡ Connecting to EduVault Cloud Bridge...[/bold cyan]")
-    with Live(render_dashboard(None), refresh_per_second=2, console=console) as live:
+    is_tty = sys.stdout.isatty()
+
+    if is_tty:
+        with Live(render_dashboard(None), refresh_per_second=1, console=console, transient=False) as live:
+            try:
+                while True:
+                    telemetry = bridge.fetch_telemetry()
+                    live.update(render_dashboard(telemetry))
+                    if telemetry and telemetry.get("stage") == "COMPLETE":
+                        time.sleep(2)
+                        break
+                    time.sleep(2)
+            except KeyboardInterrupt:
+                pass
+    else:
+        # Non-TTY fallback: one status line per poll, no redraw spam
+        console.print("[dim yellow]ℹ️  Non-TTY terminal (PowerShell). Line-per-update mode (5s interval).[/dim yellow]")
+        console.print(f"[dim]   Colab: {COLAB_NOTEBOOK_URL}[/dim]\n")
+        last_line = None
         try:
             while True:
                 telemetry = bridge.fetch_telemetry()
-                live.update(render_dashboard(telemetry))
-                if telemetry and telemetry.get("stage") == "COMPLETE":
-                    time.sleep(2)
-                    break
-                time.sleep(0.5)
+                if telemetry:
+                    stage = telemetry.get("stage", "IDLE")
+                    perc = telemetry.get("percentage", 0.0)
+                    speed = telemetry.get("speed_mbps", 0.0)
+                    title = telemetry.get("title", "")[:60]
+                    alive = "🟢" if telemetry.get("is_alive") else "🔴"
+                    line = f"{alive} [{stage}] {perc:.1f}% @ {speed:.1f} MB/s | {title}"
+                    if line != last_line:
+                        console.print(f"[{time.strftime('%H:%M:%S')}] {line}")
+                        last_line = line
+                    if stage == "COMPLETE":
+                        break
+                else:
+                    console.print(f"[{time.strftime('%H:%M:%S')}] ⏳ Waiting for Colab beacon... (is Step 5 running?)")
+                time.sleep(5)
         except KeyboardInterrupt:
             pass
 
-    console.print("\n[green]✅ Monitoring session closed. (Cloud worker continues executing remotely in background).[/green]")
 
 
 def load_batch_manifest(file_path: str) -> dict:
